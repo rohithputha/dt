@@ -5,7 +5,6 @@ use crate::gradient::Gradient;
 use crate::worker_proxy::WorkerProxy;
 use std::thread;
 use std::sync::{Arc, Mutex};
-
 pub struct Worker {
     id: u16,
     dimension: u16,
