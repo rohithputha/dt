@@ -16,9 +16,8 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn new(model_vec: Vec<f32>) -> Self {
+    pub fn new(model_vec: Vec<f32>, id: u16) -> Self {
         let mut rng = rand::thread_rng();
-        let id = rng.gen_range(1..1000);
         Worker {
             id: id,
             dimension: 10, // for now hardcoding dimension to 10

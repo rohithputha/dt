@@ -34,10 +34,10 @@ impl fmt::Display for TrainingState {
 impl TrainingCoordinator {
     pub fn new() -> Self {
         let workers =vec![
-            Arc::new(Mutex::new(Worker::new(vec![0.0; 10]))),
-            Arc::new(Mutex::new(Worker::new(vec![0.0; 10]))),
-            Arc::new(Mutex::new(Worker::new(vec![0.0; 10]))),
-            Arc::new(Mutex::new(Worker::new(vec![0.0; 10]))),
+            Arc::new(Mutex::new(Worker::new(vec![0.0; 10],1))),
+            Arc::new(Mutex::new(Worker::new(vec![0.0; 10],2))),
+            Arc::new(Mutex::new(Worker::new(vec![0.0; 10],3))),
+            Arc::new(Mutex::new(Worker::new(vec![0.0; 10],4))),
         ];
 
 
