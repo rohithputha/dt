@@ -14,6 +14,7 @@ impl Accumulator {
     }
 
     pub fn add_gradient(&mut self, grad: Gradient){
+        
         self.grs.push(grad);
         self.total_collected += 1;
     }
@@ -27,7 +28,7 @@ impl Accumulator {
                 sum += g.gr_vec[i];
             }
 
-            avg_grad.push(sum/(len as f32));
+            avg_grad.push(sum/(4 as f32));
         }
         return Gradient::new(avg_grad, 0, 0);
         // maybe the change the step number to current step number;
