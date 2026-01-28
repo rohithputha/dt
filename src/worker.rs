@@ -5,27 +5,40 @@ use crate::gradient::Gradient;
 use crate::worker_proxy::WorkerProxy;
 use std::thread;
 use std::sync::{Arc, Mutex};
+use std::sync::mpsc;
+
 pub struct Worker {
     id: u16,
     dimension: u16,
     gr_vec: Vec<f32>,
     learn_rate: f32,
     model_vec: Vec<f32>,
-
-    worker_proxy: Arc<WorkerProxy>,
+    worker_proxy_tx: mpsc::Sender<u16>,
+    // worker_proxy: Arc<WorkerProxy<u32>>,
 }
 
 impl Worker {
+
+
     pub fn new(model_vec: Vec<f32>, id: u16) -> Self {
-        let mut rng = rand::thread_rng();
+        let rng = rand::thread_rng();
+        let (tx, rx) = mpsc::channel::<u16>();
+        let worker_proxy = WorkerProxy::<u16>::new(id as u16, rx);
+        thread::spawn(move || {
+            worker_proxy.listen();
+        });
         Worker {
             id: id,
             dimension: 10, // for now hardcoding dimension to 10
             learn_rate: 0.01, // hardcoding learning rate to 0.01
             gr_vec: Vec::new(),
             model_vec: model_vec,
-            worker_proxy: Arc::new(WorkerProxy::new(id as u16)),
+            worker_proxy_tx: tx,
         }
+    }
+
+    fn connect_to_proxy(&self){
+        // future work: implement connection logic
     }
 
     pub fn compute_gradient(&mut self, step_number: u32) -> Gradient {
@@ -37,7 +50,7 @@ impl Worker {
         }
 
         self.gr_vec = gr_vec_t.clone();
-        self.perform_task();
+        // self.perform_task();
         Gradient::new(gr_vec_t, 0, 0)
 
     }
@@ -66,14 +79,4 @@ impl Worker {
         println!("Worker {} broadcasting model: {:?}", self.id, self.model_vec);
         println!("--------------------------------------------");
     } 
-
-     
-    fn perform_task(&self){
-        let wpx = Arc::clone(&self.worker_proxy);
-        let handle = thread::spawn(move || {
-            wpx.perform_task();
-        });
-
-        handle.join().unwrap();
-    }
 }

@@ -1,10 +1,12 @@
  
-use crate::worker::Worker;
 use crate::accumulator::Accumulator;
 use crate::gradient::Gradient;
+use crate::worker_pool::Threadpool;
 use std::fmt;
 use std::thread;
 use std::sync::{Arc, Mutex};
+
+
 enum TrainingState {
     Collecting,
     Aggregating,
@@ -14,7 +16,8 @@ enum TrainingState {
 
 pub struct TrainingCoordinator {
     state: TrainingState,
-    workers: Vec<Arc<Mutex<Worker>>>,
+    // workers: Vec<Arc<Mutex<Worker>>>,
+    worker_pool: Threadpool,
     accumulator: Arc<Mutex<Accumulator>>,
     avg_grad: Option<Gradient>,
 }
@@ -33,18 +36,20 @@ impl fmt::Display for TrainingState {
 
 impl TrainingCoordinator {
     pub fn new() -> Self {
-        let workers =vec![
-            Arc::new(Mutex::new(Worker::new(vec![0.0; 10],1))),
-            Arc::new(Mutex::new(Worker::new(vec![0.0; 10],2))),
-            Arc::new(Mutex::new(Worker::new(vec![0.0; 10],3))),
-            Arc::new(Mutex::new(Worker::new(vec![0.0; 10],4))),
-        ];
+        // let workers =vec![
+        //     Arc::new(Mutex::new(Worker::new(vec![0.0; 10],1))),
+        //     Arc::new(Mutex::new(Worker::new(vec![0.0; 10],2))),
+        //     Arc::new(Mutex::new(Worker::new(vec![0.0; 10],3))),
+        //     Arc::new(Mutex::new(Worker::new(vec![0.0; 10],4))),
+        // ];
+
+        let worker_pool = Threadpool::new(4);
 
 
         let accumulator = Accumulator::new();
         TrainingCoordinator {
             state: TrainingState::Collecting,
-            workers,
+            worker_pool,
             accumulator: Arc::new(Mutex::new(accumulator)),
             avg_grad: None,
         }
@@ -68,13 +73,13 @@ impl TrainingCoordinator {
         match self.state {
             TrainingState::Collecting =>{
                 println!("Collecting gradients from all workers:");
-                for wrkr in self.workers.iter_mut(){
-                    let wrkr_cloned = Arc::clone(&wrkr);
-                    let acc = Arc::clone(&self.accumulator);
-                    thread::spawn(move || {
-                        wrkr_cloned.lock().unwrap().compute_and_send(acc);
-                    });
-                    // wrkr.compute_and_send(&mut self.accumulator);
+                for i in 0..self.worker_pool.get_num_workers() {
+                    if let Some(wrkr) = self.worker_pool.get_worker_ref(i as u16) {
+                        let acc = Arc::clone(&self.accumulator);
+                        thread::spawn(move || {
+                            wrkr.lock().unwrap().compute_and_send(acc);
+                        });
+                    }
                 }
             }
 
@@ -91,7 +96,8 @@ impl TrainingCoordinator {
 
                 println!("updating models from all workers:");
                 if let Some(ref avg_g) = self.avg_grad {
-                    for wrkr in self.workers.iter_mut(){
+                    for i in 0..self.worker_pool.get_num_workers() {
+                        let wrkr = &self.worker_pool.get_worker_ref(i as u16).unwrap();
                         // println!("Avg Gradient used for update: {:?}", avg_g.gr_vec);
                         wrkr.lock().unwrap().update_model(avg_g);
                     }
@@ -99,8 +105,11 @@ impl TrainingCoordinator {
             }
             TrainingState::Broadcasting => {
                 println!("Broadcasting updated models from all workers:");
-                for wrkr in self.workers.iter(){
-                    wrkr.lock().unwrap().broadcast_model();
+            
+                for i in 0..self.worker_pool.get_num_workers() {
+                    if let Some(wrkr) = self.worker_pool.get_worker_ref(i as u16) {
+                        wrkr.lock().unwrap().broadcast_model();
+                    }
                 }
                 self.accumulator.lock().unwrap().reset();
             }
