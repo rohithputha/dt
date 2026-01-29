@@ -1,19 +1,15 @@
 use std::sync::{Arc, Mutex};
 use crate::worker::Worker;
 
-pub struct Threadpool {
-    workers: Vec<Arc<Mutex<Worker>>>,
+pub struct Threadpool<T> {
+    workers: Vec<Arc<Mutex<T>>>,
 }
 
-
-// each worker will create a worker proxy: the worker proxy later on will try to connect with GPU or other worker nodes
-
-// the coordinator will create a threadpool of workers, 
-impl Threadpool {
-    pub fn new(num: u16) -> Self {
+impl<T> Threadpool<T> {
+    pub fn new(num: u16, factory: fn(u16)-> T) -> Self {
         let mut workers = Vec::new();
         for i in 0..num{
-            let worker = Arc::new(Mutex::new(Worker::new(vec![0.0; 10], i as u16)));
+            let worker = Arc::new(Mutex::new(factory(i)));
             workers.push(worker);
         }
 
@@ -22,7 +18,14 @@ impl Threadpool {
         }
     }
 
-    pub fn get_worker_ref(&self, id: u16) -> Option<Arc<Mutex<Worker>>> {
+    pub fn new_empty()-> Self {
+        Threadpool {
+            workers: Vec::new(),
+        }
+
+    }
+
+    pub fn get_worker_ref(&self, id: u16) -> Option<Arc<Mutex<T>>> {
         if id as usize >= self.workers.len() {
             return None;
         }
@@ -33,6 +36,13 @@ impl Threadpool {
     pub fn get_num_workers(&self) -> usize {
         self.workers.len()
     }
+
+    pub fn add_worker(&mut self, worker: T) {
+        let wrkr = Arc::new(Mutex::new(worker));
+        self.workers.push(wrkr);
+    }
+
+    
 
 
     // future work: implement a function to distribute tasks to workers in the pool

@@ -2,9 +2,11 @@
 use crate::accumulator::Accumulator;
 use crate::gradient::Gradient;
 use crate::worker_pool::Threadpool;
+use crate::worker::Worker;
+use crate::paramer_server::ParamServer;
 use std::fmt;
 use std::thread;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 
 
 enum TrainingState {
@@ -17,7 +19,8 @@ enum TrainingState {
 pub struct TrainingCoordinator {
     state: TrainingState,
     // workers: Vec<Arc<Mutex<Worker>>>,
-    worker_pool: Threadpool,
+    worker_pool: Threadpool<Worker>,
+    param_server_pool: Threadpool<ParamServer>,
     accumulator: Arc<Mutex<Accumulator>>,
     avg_grad: Option<Gradient>,
 }
@@ -43,15 +46,25 @@ impl TrainingCoordinator {
         //     Arc::new(Mutex::new(Worker::new(vec![0.0; 10],4))),
         // ];
 
-        let worker_pool = Threadpool::new(4);
+        let worker_pool = Threadpool::<Worker>::new(4, |id| {
+            Worker::new(vec![0.0; 10], id)
+        });
+
+        let mut param_server_pool = Threadpool::<ParamServer>::new_empty();
+
+        param_server_pool.add_worker(ParamServer::new(1, (0, 1000), String::from(""), mpsc::channel()));
+        param_server_pool.add_worker(ParamServer::new(2, (1001, 2000), String::from(""), mpsc::channel()));
+
 
 
         let accumulator = Accumulator::new();
+
         TrainingCoordinator {
             state: TrainingState::Collecting,
             worker_pool,
             accumulator: Arc::new(Mutex::new(accumulator)),
             avg_grad: None,
+            param_server_pool,
         }
     }
 
@@ -115,7 +128,6 @@ impl TrainingCoordinator {
             }
 
         }
-
         self.transition_state();
     }
 
