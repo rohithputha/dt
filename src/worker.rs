@@ -9,6 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
 use std::net::TcpStream;
 
+struct param_server_info {
+    param_server_id: u16,
+    param_server_proxy_address: mpsc::Sender<Protocol>,
+    gradient_range: (u128, u128),
+}
 pub struct Worker {
     id: u16,
     dimension: u16,
@@ -20,7 +25,7 @@ pub struct Worker {
     worker_tx: mpsc::Sender<Protocol>,
     worker_rx:  mpsc::Receiver<Protocol>,
     proxy_streams: Vec<TcpStream>, // a more robust way of choosing communication channels needed 
-
+    param_server_channels: Vec<param_server_info>,
     // worker_proxy: Arc<WorkerProxy<u32>>,
 }
 
@@ -46,10 +51,11 @@ impl Worker {
             worker_tx: mpsc::channel::<Protocol>().0,// temporary
             worker_rx: mpsc::channel::<Protocol>().1,
             proxy_streams: Vec::new(),
+            param_server_channels: Vec::new(),
         }
     }
 
-    pub fn listen(&self){
+    pub fn listen(&mut self){
         loop{
             match self.worker_rx.recv(){
                 Ok (command)=>{
@@ -66,6 +72,20 @@ impl Worker {
 
 
                         }
+
+                        Protocol::WorkerServerRequest{request_id, request_type}=>{
+                            for param_server in &self.param_server_channels{
+                                if param_server.param_server_id == worker_id{
+                                    println!("Worker {} received WorkerServerAddressChannelResponse from Worker {}", self.id, worker_id);
+                                    // future work: save the proxy address and gradient range to send gradients later
+                                    param_server.param_server_proxy_address.send(Protocol::WorkerServerAddressChannelResponse{
+                                        worker_id: self.id,
+                                        worker_proxy_address: self.worker_proxy_tx.clone(),
+                                    });
+                                }
+                            }
+                        }
+
                         _ =>{
                             println!("Worker {} received unknown command", self.id);
                         }
@@ -78,6 +98,16 @@ impl Worker {
                 }
             }
         }
+    }
+
+    pub fn add_param_server_channels_tx(&mut self, tx: mpsc::Sender<Protocol>, gradient_range: (u128, u128), param_server_id: u16){
+        self.param_server_channels.push(
+            param_server_info{
+                param_server_id: param_server_id,
+                param_server_proxy_address: tx,
+                gradient_range: gradient_range,
+            }
+        );
     }
 
     fn connect_to_proxy(&self){

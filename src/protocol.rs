@@ -1,6 +1,8 @@
 
 use std::sync::mpsc;
 use crate::gradient::Gradient;
+
+#[derive(Clone)]
 pub enum Protocol {
     // GradientMessage{
     //     worker_id: u16,
@@ -31,6 +33,17 @@ pub enum Protocol {
         param_server_id: u16,
         param_server_proxy_address: mpsc::Sender<Protocol>,
         gradient_range: (u128, u128),
+    },
+
+
+    WorkerServerAddressChannelResponse {
+        worker_id: u16,
+        worker_proxy_address: mpsc::Sender<Protocol>,
+    },
+
+    WorkerServerRequest{
+        request_id: u16,
+        request_type: String
     },
 
     ParamProxyWorkerGradientMessage{

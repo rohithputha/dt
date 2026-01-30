@@ -7,7 +7,7 @@ use crate::paramer_server::ParamServer;
 use std::fmt;
 use std::thread;
 use std::sync::{Arc, Mutex, mpsc};
-
+use crate::config_plane::ConfigPlane;
 
 enum TrainingState {
     Collecting,
@@ -23,6 +23,7 @@ pub struct TrainingCoordinator {
     param_server_pool: Threadpool<ParamServer>,
     accumulator: Arc<Mutex<Accumulator>>,
     avg_grad: Option<Gradient>,
+
 }
 
 impl fmt::Display for TrainingState {
@@ -46,6 +47,9 @@ impl TrainingCoordinator {
         //     Arc::new(Mutex::new(Worker::new(vec![0.0; 10],4))),
         // ];
 
+        let mut config_plane = ConfigPlane::new();
+
+
         let worker_pool = Threadpool::<Worker>::new(4, |id| {
             Worker::new(vec![0.0; 10], id)
         });
@@ -65,6 +69,7 @@ impl TrainingCoordinator {
             accumulator: Arc::new(Mutex::new(accumulator)),
             avg_grad: None,
             param_server_pool,
+            config_plane,
         }
     }
 

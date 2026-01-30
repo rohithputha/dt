@@ -7,6 +7,8 @@ mod worker_pool;
 mod protocol;
 mod paramer_server;
 mod param_server_proxy;
+mod config_plane;
+
 use crate::training_coordinator::TrainingCoordinator;
 
 

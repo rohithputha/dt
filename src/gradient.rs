@@ -1,4 +1,4 @@
-
+#[derive(Clone)]
 pub struct Gradient {
     pub gr_vec: Vec<f32>,
     pub step_number: u32,
