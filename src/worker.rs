@@ -7,7 +7,7 @@ use crate::protocol::Protocol;
 use std::thread;
 use std::sync::{Arc, Mutex};
 use std::sync::mpsc;
-use td::net::TcpStream;
+use std::net::TcpStream;
 
 pub struct Worker {
     id: u16,
@@ -31,7 +31,7 @@ impl Worker {
     pub fn new(model_vec: Vec<f32>, id: u16) -> Self {
         let rng = rand::thread_rng();
         let (tx, rx) = mpsc::channel::<Protocol>();
-        let worker_proxy = WorkerProxy::<Protocol>::new(id as u16, rx);
+        let mut worker_proxy = WorkerProxy::new(id as u16, rx);
         thread::spawn(move || {
             worker_proxy.listen();
         });
@@ -45,6 +45,7 @@ impl Worker {
 
             worker_tx: mpsc::channel::<Protocol>().0,// temporary
             worker_rx: mpsc::channel::<Protocol>().1,
+            proxy_streams: Vec::new(),
         }
     }
 
@@ -62,7 +63,7 @@ impl Worker {
                                 param_server_proxy_address,
                                 gradient_range,
                             });
-                            
+
 
                         }
                         _ =>{
