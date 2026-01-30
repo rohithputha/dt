@@ -52,8 +52,8 @@ impl TrainingCoordinator {
 
         let mut param_server_pool = Threadpool::<ParamServer>::new_empty();
 
-        param_server_pool.add_worker(ParamServer::new(1, (0, 1000), String::from(""), mpsc::channel()));
-        param_server_pool.add_worker(ParamServer::new(2, (1001, 2000), String::from(""), mpsc::channel()));
+        param_server_pool.add_worker(ParamServer::new(1, (0, 1000), String::from(""), mpsc::channel(), vec![]));
+        param_server_pool.add_worker(ParamServer::new(2, (1001, 2000), String::from(""), mpsc::channel(), vec![]));
 
 
 
