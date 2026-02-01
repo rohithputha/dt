@@ -1,117 +1,116 @@
 use std::thread;
+use std::time::Duration;
 use rand::Rng;
-use std::sync::mpsc;
+
 use crate::protocol::Protocol;
 use crate::gradient::Gradient;  
+use tokio::sync::broadcast::{Receiver, Sender};
+use crate::worker_proxy::state::{compute, send, wait};
+pub struct WorkerProxy {
+    id: u16,
+    tx: Sender<Protocol>,
+    rx: Receiver<Protocol>,
+    state: state,
 
-enum param_server_config{
-    local {
-        param_server_id: u16,
-        param_server_proxy_address: mpsc::Sender<Protocol>,
-        gradient_range: (u128, u128),
-    },
-
-    remote {
-        param_server_id: u16,
-        ip_address: String,
-        port: u16,
-    }
+    gradient_destinations: Vec<Protocol>
 }
 
+
+#[derive(Copy, Clone)] // better if eq or partial eq?
 enum state {
+    wait,
     compute,
     send,
 }
-// more granualar states required later
 
 
-pub struct WorkerProxy {
-    id: u16,
-    rx: mpsc::Receiver<Protocol>,
-
-    param_servers: Vec<param_server_config>,
-    state: state,
-}
 
 impl WorkerProxy {
-    pub fn new(id: u16, rx: mpsc::Receiver<Protocol>) -> Self {
+    pub fn new(id: u16, tx: Sender<Protocol>) -> Self {
+        let mut rx = tx.subscribe();
         WorkerProxy { 
             id,
+            tx,
             rx,
-            param_servers: Vec::new(),
-            state: state::compute,
+            state: wait,
+
+            gradient_destinations: Vec::new()
         }
     }
 
-    pub fn listen(&mut self){
-        loop{
-            match self.rx.recv(){
-                Ok(command) =>{
-                    match command {
+    fn transition_state(&mut self) {
+        match self.state {
+            wait => self.state = compute,
+            compute => self.state = send,
+            send => self.state = wait
+        }
 
-                        Protocol::WorkerProxyCommand{command_id, command_type}=>{
-                            if command_type == "compute"{
-                                self.state = state::compute;
+    }
 
-                                // do computation here
-                                thread::sleep(std::time::Duration::from_millis(5000));
+    fn is_state(&self, st: state) -> bool {
+        match self.state {
+            st => true,
+            _ => false
+        }
+    }
+
+    fn compute(&mut self){
+        thread::sleep(Duration::from_secs(1));
+        // this has to load the latest model and calculate the gradients for this step
+    }
+
+    fn send(&self){
+        // implement the send of gradients to various param servers
+        // for TCP maybe do TCP streaming.
+    }
+
+    pub async fn listen(&mut self){
+
+        // This worker proxy thread should take two commands:
+        // 1. Take param server addresses when provided (along with gradient range provided)
+        // 2. take a command compute next set of gradients by loadng the present model,
+        // The worker proxy should also send the gradients (sharded) to all the param server proxies
+        // After sending the worker should wait for further commands
+
+        let mut rx = self.tx.subscribe();
+        loop {
+            if let Ok(command) = rx.recv().await {
+                match command {
+                    Protocol::ToWorkerProxyCommandAddressChannelTcp {id, param_server_proxy_address, gradient_range} =>{
+                        self.gradient_destinations.push(Protocol::ToWorkerProxyCommandAddressChannelTcp {id, param_server_proxy_address, gradient_range});
+                    }
+
+                    Protocol::ToWorkerProxyCommandAddressChannelLocal {id, param_server_proxy_address, gradient_range} => {
+                        self.gradient_destinations.push(Protocol::ToWorkerProxyCommandAddressChannelLocal {id, param_server_proxy_address, gradient_range});
+                    }
+
+                    Protocol::ToWorkerProxyCommand {id, cmd} =>{
+
+                        if cmd.eq("compute"){
+                            if self.is_state(state::wait){
+                                self.transition_state();
+                                self.compute();
                             }
-                            else if command_type == "send"{
-                                self.state = state::send;
-                                for param_server in &self.param_servers{
-                                    match param_server {
-                                        param_server_config::local{param_server_id, param_server_proxy_address, gradient_range}=>{
-                                            println!("WorkerProxy {} sending gradient to ParamServer {}", self.id, param_server_id);
-                                            // future work: send the actual gradient
-                                            param_server_proxy_address.send(Protocol::ParamProxyWorkerGradientMessage{
-                                                worker_id: self.id,
-                                                gradient: Gradient::new(Vec::new(), 0, 0), // future work: send actual gradient
-                                                gradient_range: *gradient_range,
-                                            });
-                                        }
-                                        param_server_config::remote{param_server_id, ip_address, port}=>{
-                                            println!("WorkerProxy {} cannot send gradient to remote ParamServer {} yet", self.id, param_server_id);
-                                            // future work: implement sending to remote param server
-                                        }
-                                    }
-                                }
+                            if self.is_state(state::send){
+                                // this has to be rejected ?
                             }
-                            // future work: handle different command types
                         }
-                        Protocol::ParamServerWorkerAddressChannelResponse{param_server_id,param_server_proxy_address,gradient_range} =>{
-                            println!("WorkerProxy {} received ParamServerWorkerAddressChannelResponse from ParamServer {}", self.id, param_server_id);
-                            // future work: save the proxy address and gradient range to send gradients later
-                            self.param_servers.push(
-                                param_server_config::local{
-                                    param_server_id,
-                                    param_server_proxy_address,
-                                    gradient_range,
-                                }
-                            );
-                        }
-                        Protocol::ParamProxyWorkerGradientMessage{worker_id, gradient, gradient_range}=>{
-                            println!("WorkerProxy {} received ParamProxyWorkerGradientMessage from Worker {}", self.id, worker_id);
-                            // future work: handle the received gradient
-                        }
-
-                        _ =>{
-                            println!("WorkerProxy {} received unknown command", self.id);
+                        else if cmd.eq("send"){
+                            if self.is_state(state::compute){
+                                self.transition_state();
+                                self.send()
+                            }
+                            else if self.is_state(state::wait){
+                                // reject it
+                            }
                         }
                     }
-                }
-                Err(e)=>{
-                    println!("WorkerProxy {} error receiving message: {}", self.id, e);
-                    break;
+                    
+                    _ =>{
+                        println!("Unknown command in worker proxy");
+                    }
                 }
             }
         }
-    }
-
-    pub fn perform_task(&self){
-
-        let mut trg = rand::thread_rng();
-        let sleep_time = trg.gen_range(1000..10000);
-        thread::sleep(std::time::Duration::from_millis(sleep_time));
-    
     }
 }

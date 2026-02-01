@@ -6,12 +6,12 @@ use crate::worker_proxy::WorkerProxy;
 use crate::protocol::Protocol;
 use std::thread;
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc;
-use std::net::TcpStream;
+
+use tokio::sync::broadcast::{Sender, Receiver, channel};
 
 struct param_server_info {
     param_server_id: u16,
-    param_server_proxy_address: mpsc::Sender<Protocol>,
+    param_server_proxy_address: Sender<Protocol>,
     gradient_range: (u128, u128),
 }
 pub struct Worker {
@@ -20,140 +20,111 @@ pub struct Worker {
     gr_vec: Vec<f32>,
     learn_rate: f32,
     model_vec: Vec<f32>,
-    worker_proxy_tx: mpsc::Sender<Protocol>, // this has to be optional if we have multiple types of communication channels (think TCP, thread channels etc)
 
-    worker_tx: mpsc::Sender<Protocol>,
-    worker_rx:  mpsc::Receiver<Protocol>,
-    proxy_streams: Vec<TcpStream>, // a more robust way of choosing communication channels needed 
-    param_server_channels: Vec<param_server_info>,
-    // worker_proxy: Arc<WorkerProxy<u32>>,
+    // worker_proxy_tx: mpsc::Sender<Protocol>, // this has to be optional if we have multiple types of communication channels (think TCP, thread channels etc)
+
+    // worker_tx: mpsc::Sender<Protocol>,
+    // worker_rx:  mpsc::Receiver<Protocol>,
+    // proxy_streams: Vec<TcpStream>, // a more robust way of choosing communication channels needed
+    // param_server_channels: Vec<param_server_info>,
+    // // worker_proxy: Arc<WorkerProxy<u32>>,
+
+    config_plane_tx: Sender<Protocol>,
+    config_plan_rx: Receiver<Protocol>,
+
+    worker_proxy_address: Vec<String>,
+    worker_proxy_true: bool,
+
 }
 
 
 // each worker will have to calculate the model m 
 impl Worker {
 
-    pub fn new(model_vec: Vec<f32>, id: u16) -> Self {
+    pub fn new(model_vec: Vec<f32>, id: u16, tx: Sender<Protocol>, proxy_address: Vec<String>) -> Self {
         let rng = rand::thread_rng();
-        let (tx, rx) = mpsc::channel::<Protocol>();
-        let mut worker_proxy = WorkerProxy::new(id as u16, rx);
-        thread::spawn(move || {
-            worker_proxy.listen();
-        });
-        Worker {
+
+        // spawning should be more conditional
+
+        let rx = tx.subscribe();
+        let mut worker = Worker {
             id: id,
             dimension: 10, // for now hardcoding dimension to 10
             learn_rate: 0.01, // hardcoding learning rate to 0.01
             gr_vec: Vec::new(),
             model_vec: model_vec,
-            worker_proxy_tx: tx,
 
-            worker_tx: mpsc::channel::<Protocol>().0,// temporary
-            worker_rx: mpsc::channel::<Protocol>().1,
-            proxy_streams: Vec::new(),
-            param_server_channels: Vec::new(),
-        }
+            config_plane_tx: tx,
+            config_plan_rx: rx,
+            worker_proxy_address: Vec::new(),
+            worker_proxy_true: false,
+        };
+        
+        worker.connect_proxy();
+        worker
     }
 
-    pub fn listen(&mut self){
+    pub async fn listen(&mut self){
+
+        // The worker should take commands from the coordinator to
+        // 1. start compute of the gradients
+        // 2. send the gradients to the param servers
+        // 3. maybe wait?
+
+
+
         loop{
-            match self.worker_rx.recv(){
-                Ok (command)=>{
-                    match command {
-                        Protocol::ParamServerWorkerAddressChannelResponse{param_server_id,param_server_proxy_address,gradient_range} =>{
-                            println!("Worker {} received ParamServerWorkerAddressChannelResponse from ParamServer {}", self.id, param_server_id);
-                            // we need to send the gradient range and the proxy address worker proxy 
-                            // the proxy saves it and uses it to send the gradients
-                            self.worker_proxy_tx.send(Protocol::ParamServerWorkerAddressChannelResponse{
-                                param_server_id,
-                                param_server_proxy_address,
-                                gradient_range,
-                            });
+            if let Ok(command) = self.config_plan_rx.recv().await {
+                match command {
 
+                    Protocol::ToWorkerCommandAddressChannelLocal{id, param_server_proxy_address, gradient_range} => {
+                        self.config_plane_tx.send(Protocol::ToWorkerProxyCommandAddressChannelLocal {
+                            id,
+                            param_server_proxy_address,
+                            gradient_range
+                        }).unwrap();
 
-                        }
+                    }
 
-                        Protocol::WorkerServerRequest{request_id, request_type}=>{
-                            for param_server in &self.param_server_channels{
-                                if param_server.param_server_id == worker_id{
-                                    println!("Worker {} received WorkerServerAddressChannelResponse from Worker {}", self.id, worker_id);
-                                    // future work: save the proxy address and gradient range to send gradients later
-                                    param_server.param_server_proxy_address.send(Protocol::WorkerServerAddressChannelResponse{
-                                        worker_id: self.id,
-                                        worker_proxy_address: self.worker_proxy_tx.clone(),
-                                    });
-                                }
-                            }
-                        }
+                    Protocol::ToWorkerCommandAddressChannelTcp {id, param_server_proxy_address, gradient_range} => {
+                        self.config_plane_tx.send(Protocol::ToWorkerProxyCommandAddressChannelTcp {
+                            id,
+                            param_server_proxy_address,
+                            gradient_range
+                        }).unwrap();
+                    }
 
-                        _ =>{
-                            println!("Worker {} received unknown command", self.id);
+                    Protocol::ToWorkerCommand {id, cmd} =>{
+                        // more filtering and intelligence needed here...
+                        if cmd.eq("compute") || cmd.eq("send") {
+                            self.config_plane_tx.send(Protocol::ToWorkerProxyCommand { id: id, cmd: cmd }).unwrap();
                         }
                     }
-                }
-                
-                Err(e)=>{
-                    println!("Worker {} error receiving message: {}", self.id, e);
-                    break;
+
+
+
+                    _ =>{
+                        println!("command received by worker {}", self.id);
+                        println!("command not processed by worker");
+                    }
+
+
                 }
             }
+
         }
     }
 
-    pub fn add_param_server_channels_tx(&mut self, tx: mpsc::Sender<Protocol>, gradient_range: (u128, u128), param_server_id: u16){
-        self.param_server_channels.push(
-            param_server_info{
-                param_server_id: param_server_id,
-                param_server_proxy_address: tx,
-                gradient_range: gradient_range,
-            }
-        );
-    }
-
-    fn connect_to_proxy(&self){
-        // future work: implement connection logic
-    }
-
-    pub fn compute_gradient(&mut self, step_number: u32) -> Gradient {
-        
-        let mut gr_vec_t = Vec::<f32>::new();
-        let mut rng = rand::thread_rng();
-        for _ in 0..self.dimension{
-            gr_vec_t.push(rng.gen_range(-1.0..1.0));
+    pub fn connect_proxy(&self){
+        if self.worker_proxy_address.len() != 0{
+            // future work
         }
-
-        self.gr_vec = gr_vec_t.clone();
-        // self.perform_task();
-        Gradient::new(gr_vec_t, 0, 0)
-
-    }
-
-
-    pub fn send_to_accumulator(&self, acc: Arc<Mutex<Accumulator>>){
-        let grad = Gradient::new(self.gr_vec.clone(), 0, 0);
-        println!("Worker {} sending gradient: {:?}", self.id, grad.gr_vec);
-        acc.lock().unwrap().add_gradient(grad);
-    }
-
-    pub fn compute_and_send(&mut self, acc: Arc<Mutex<Accumulator>>){
-        let grad = self.compute_gradient(0); // step_number is not used in this implementation
-        self.send_to_accumulator(acc);
-    }
-
-    pub fn update_model(&mut self, avg_grad: &Gradient){
-        println!("Worker {} updating model with gradient: {:?}", self.id, avg_grad.gr_vec);
-        for (m, g) in self.model_vec.iter_mut().zip(avg_grad.gr_vec.iter()) {
-            *m -= self.learn_rate * g;
+        else {
+            // if there are no addresses prosent, then spawn the worker proxy thread.
+            let mut worker_proxy = WorkerProxy::new(self.id, self.config_plane_tx.clone());
+            thread::spawn(move || {
+                worker_proxy.listen();
+            });
         }
-        // self.perform_task();
-    }
-
-    pub fn broadcast_model(&self){
-        println!("Worker {} broadcasting model: {:?}", self.id, self.model_vec);
-        println!("--------------------------------------------");
-    } 
-
-    pub fn get_tx(&self) -> mpsc::Sender<Protocol> {
-        self.worker_tx.clone()
     }
 }

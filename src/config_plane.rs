@@ -18,5 +18,9 @@ impl ConfigPlane {
     pub fn subscribe(&self) -> Receiver<Protocol> {
         self.tx.subscribe()
     }
+    
+    pub fn get_config_plane_tx(&self) -> Sender<Protocol> {
+        self.tx.clone()
+    }
 
 }
