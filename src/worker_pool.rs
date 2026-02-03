@@ -1,5 +1,4 @@
 use std::sync::{Arc, Mutex};
-use crate::worker::Worker;
 
 pub struct Threadpool<T> {
     workers: Vec<Arc<Mutex<T>>>,
