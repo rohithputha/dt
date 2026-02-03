@@ -28,14 +28,14 @@ impl Accumulator {
                 sum += g.gr_vec[i];
             }
 
-            avg_grad.push(sum/(4 as f32));
+            avg_grad.push(sum / self.grs.len() as f32);
         }
         return Gradient::new(avg_grad, 0, 0);
         // maybe the change the step number to current step number;
     }
 
-    pub fn is_ready(&self) -> bool {
-        self.total_collected ==  4 // assuming 4 workers
+    pub fn is_ready(&self, expected: u32) -> bool {
+        self.total_collected == expected
     }
 
     pub fn reset(&mut self){

@@ -11,8 +11,8 @@ mod config_plane;
 
 use crate::training_coordinator::TrainingCoordinator;
 
-
-fn main() {
+#[tokio::main]
+async fn main() {
    let mut tc = TrainingCoordinator::new();
-   tc.run_cycles();
+   tc.run_cycles().await;
 }

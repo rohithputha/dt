@@ -1,5 +1,3 @@
-
-use std::sync::mpsc;
 use crate::gradient::Gradient;
 
 #[derive(Clone, Debug)]
@@ -119,7 +117,15 @@ pub enum Protocol {
         id: u16,
         message: String,
         w_type: String,
-    }
+    },
 
+    GradientToParamServer {
+        worker_proxy_id: u16,
+        gradient: Gradient,
+    },
+    GradientFromParamServer {
+        param_server_proxy_id: u16,
+        gradient: Gradient,
+    },
 }
 

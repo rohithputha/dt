@@ -1,195 +1,195 @@
- 
-use crate::accumulator::Accumulator;
-use crate::gradient::Gradient;
-use crate::worker_pool::Threadpool;
 use crate::worker::Worker;
 use crate::paramer_server::ParamServer;
-use std::fmt;
-use std::thread;
-use std::sync::{Arc, Mutex, mpsc};
 use crate::config_plane::ConfigPlane;
 use crate::protocol::Protocol;
-use tokio::sync::broadcast::{Sender, Receiver, channel};
+use tokio::sync::broadcast::{Sender, Receiver};
 
-enum TrainingState {
-    Collecting,
-    Aggregating,
-    Updating, 
-    Broadcasting,
-}
-
-struct w_state {
-    ready: u16,
-    not_ready: u16,
-    total: u16,
+#[derive(Debug)]
+enum CoordinatorState {
+    Initializing,
+    WorkersComputing,
+    WorkersSending,
+    ParamServersReceiving,
+    ParamServersComputing,
+    ParamServersSending,
 }
 
 pub struct TrainingCoordinator {
-    state: TrainingState,
-    // workers: Vec<Arc<Mutex<Worker>>>,
-    worker_pool: Threadpool<Worker>,
-    param_server_pool: Threadpool<ParamServer>,
-    accumulator: Arc<Mutex<Accumulator>>,
-    avg_grad: Option<Gradient>,
-
+    state: CoordinatorState,
     config_plane_tx: Sender<Protocol>,
     config_plane_rx: Receiver<Protocol>,
 
+    num_workers: u16,
+    num_param_servers: u16,
+    max_cycles: u32,
 
-    worker_state: w_state,
-    param_server_state: w_state,
-}
+    // per-message-type counters — always incremented on receipt, reset when consumed by a transition
+    workers_waited: u16,
+    workers_compute_done: u16,
+    workers_send_done: u16,
+    param_servers_waited: u16,
+    param_servers_receive_done: u16,
+    param_servers_compute_done: u16,
+    param_servers_send_done: u16,
 
-impl fmt::Display for TrainingState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let state_str = match self {
-            TrainingState::Collecting => "Collecting",
-            TrainingState::Aggregating => "Aggregating",
-            TrainingState::Updating => "Updating",
-            TrainingState::Broadcasting => "Broadcasting",
-        };
-        write!(f, "{}", state_str)
-    }
+    cycle: u32,
 }
 
 impl TrainingCoordinator {
     pub fn new() -> Self {
-        // let workers =vec![
-        //     Arc::new(Mutex::new(Worker::new(vec![0.0; 10],1))),
-        //     Arc::new(Mutex::new(Worker::new(vec![0.0; 10],2))),
-        //     Arc::new(Mutex::new(Worker::new(vec![0.0; 10],3))),
-        //     Arc::new(Mutex::new(Worker::new(vec![0.0; 10],4))),
-        // ];
-
-        let mut config_plane = ConfigPlane::new();
-
-
-        let worker_pool = Threadpool::<Worker>::new(4, |id| {
-            Worker::new(vec![0.0; 10], id)
-        });
-
-        let mut param_server_pool = Threadpool::<ParamServer>::new_empty();
-
-        param_server_pool.add_worker(ParamServer::new(1, (0, 1000), String::from(""), mpsc::channel(), vec![]));  //need to fix this
-        param_server_pool.add_worker(ParamServer::new(2, (1001, 2000), String::from(""), mpsc::channel(), vec![]));
-
-
-
-        let accumulator = Accumulator::new();
-
+        let config_plane = ConfigPlane::new();
         TrainingCoordinator {
-            state: TrainingState::Collecting,
-            worker_pool,
-            accumulator: Arc::new(Mutex::new(accumulator)),
-            avg_grad: None,
-            param_server_pool,
-            config_plane_tx : config_plane.get_config_plane_tx(),
-            config_plane_rx : config_plane.subscribe(),
-            worker_state :  w_state{
-                ready: 0,
-                not_ready: 0,
-                total: 4,
-            },
-            param_server_state: w_state {
-                ready: 0,
-                not_ready: 0,
-                total: 2,
-            },
+            state: CoordinatorState::Initializing,
+            config_plane_tx: config_plane.get_config_plane_tx(),
+            config_plane_rx: config_plane.subscribe(),
+            num_workers: 4,
+            num_param_servers: 2,
+            max_cycles: 3,
+            workers_waited: 0,
+            workers_compute_done: 0,
+            workers_send_done: 0,
+            param_servers_waited: 0,
+            param_servers_receive_done: 0,
+            param_servers_compute_done: 0,
+            param_servers_send_done: 0,
+            cycle: 0,
         }
-
-
     }
 
-    fn transition_state(&mut self){
-        self.state = match self.state {
-            TrainingState::Collecting => TrainingState::Aggregating,
-            TrainingState::Aggregating => TrainingState::Updating,
-            TrainingState::Updating => TrainingState::Broadcasting,
-            TrainingState::Broadcasting => TrainingState::Collecting,
+    pub async fn run_cycles(&mut self) {
+        // spawn workers
+        for i in 1..=self.num_workers {
+            let tx = self.config_plane_tx.clone();
+            tokio::spawn(async move {
+                let mut worker = Worker::new(vec![0.0; 10], i, tx);
+                worker.listen().await;
+            });
         }
-    } 
 
-    fn get_state(&self) -> &TrainingState {
-        &self.state
+        // spawn param servers
+        for i in 1..=self.num_param_servers {
+            let tx = self.config_plane_tx.clone();
+            let num_workers = self.num_workers;
+            tokio::spawn(async move {
+                let mut ps = ParamServer::new(i, (0, 9), tx, num_workers);
+                ps.listen().await;
+            });
+        }
+
+        // main coordinator message loop
+        loop {
+            match self.config_plane_rx.recv().await {
+                Ok(Protocol::ToCoordinatorMessage { id, message, w_type }) => {
+                    self.handle_message(id, &message, &w_type);
+                    if self.cycle >= self.max_cycles {
+                        println!("[Coordinator] Completed {} cycles. Exiting.", self.max_cycles);
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    eprintln!("[Coordinator] Lagged by {} messages, re-syncing.", n);
+                }
+                Err(_) => break,
+            }
+        }
     }
 
-    async fn run_state(&mut self){
-        // the coordinator receives messages from worker and paramserver threads
-        // it receives the messages from the worker: in the following condition :
-        // when all the worker are initiated, the worker sends a message
-        // when each worker is done computing
-        // when each worker is done sending
-        // the coordinator receives messages from the param server
-        // each param server sends a message when it receives when the param server receives the gradients
-        // each param server sends a message when it sends back the gradients
+    fn send_to_workers(&self, cmd: &str) {
+        self.config_plane_tx.send(Protocol::ToWorkerCommand {
+            id: 0, // 0 = broadcast to all workers
+            cmd: cmd.to_string(),
+        }).unwrap();
+    }
 
-        loop{
-            if let Ok(command) = self.config_plane_rx.recv().await{
-                match command {
-                    Protocol::ToCoordinatorMessage {id, message, w_type} =>{
-                        if w_type.eq("worker"){
-                            if message.eq("wait"){
-                                self.worker_state.ready+=1;
-                                if self.worker_state.ready == self.worker_state.total {
-                                    //set all workers to not ready
-                                    // tell workers to start computing
-                                }
-                            }
-                            else if message.eq("compute_done"){
-                                // then tell the worker to send the gradients
-                            }
-                            else if message.eq("send_done"){
-                                // then tell worker to wait
-                                // make workers ready again
-                            }
+    fn send_to_param_servers(&self, cmd: &str) {
+        self.config_plane_tx.send(Protocol::ToParamServerCommand {
+            id: 0, // 0 = broadcast to all param servers
+            cmd: cmd.to_string(),
+        }).unwrap();
+    }
+
+    fn handle_message(&mut self, id: u16, message: &str, w_type: &str) {
+        // always increment the matching counter
+        match (w_type, message) {
+            ("worker",       "wait")          => { self.workers_waited        += 1; }
+            ("worker",       "compute_done")  => { self.workers_compute_done  += 1; }
+            ("worker",       "send_done")     => { self.workers_send_done     += 1; }
+            ("param_server", "wait")          => { self.param_servers_waited  += 1; }
+            ("param_server", "receive_done")  => { self.param_servers_receive_done  += 1; }
+            ("param_server", "compute_done")  => { self.param_servers_compute_done += 1; }
+            ("param_server", "send_done")     => { self.param_servers_send_done    += 1; }
+            _ => { return; }
+        }
+
+        println!("[Coordinator] [{:?}] {} {} (id {})", self.state, w_type, message, id);
+
+        // cascading transition check — after one transition the new state's
+        // condition may already be satisfied (counters arrived out of order)
+        loop {
+            let mut transitioned = false;
+            match self.state {
+                CoordinatorState::Initializing => {
+                    if self.workers_waited >= self.num_workers
+                        && self.param_servers_waited >= self.num_param_servers
+                    {
+                        println!("[Coordinator] All components ready. Starting cycle {}.", self.cycle);
+                        self.workers_waited = 0;
+                        self.param_servers_waited = 0;
+                        self.send_to_workers("compute");
+                        self.state = CoordinatorState::WorkersComputing;
+                        transitioned = true;
+                    }
+                }
+                CoordinatorState::WorkersComputing => {
+                    if self.workers_compute_done >= self.num_workers {
+                        println!("[Coordinator] All workers computed. Telling them to send.");
+                        self.workers_compute_done = 0;
+                        self.send_to_workers("send");
+                        self.state = CoordinatorState::WorkersSending;
+                        transitioned = true;
+                    }
+                }
+                CoordinatorState::WorkersSending => {
+                    if self.workers_send_done >= self.num_workers {
+                        println!("[Coordinator] All workers sent. Waiting for param servers to accumulate.");
+                        self.workers_send_done = 0;
+                        self.state = CoordinatorState::ParamServersReceiving;
+                        transitioned = true;
+                    }
+                }
+                CoordinatorState::ParamServersReceiving => {
+                    if self.param_servers_receive_done >= self.num_param_servers {
+                        println!("[Coordinator] All param servers received gradients. Telling them to compute.");
+                        self.param_servers_receive_done = 0;
+                        self.send_to_param_servers("compute");
+                        self.state = CoordinatorState::ParamServersComputing;
+                        transitioned = true;
+                    }
+                }
+                CoordinatorState::ParamServersComputing => {
+                    if self.param_servers_compute_done >= self.num_param_servers {
+                        println!("[Coordinator] All param servers computed avg. Telling them to send.");
+                        self.param_servers_compute_done = 0;
+                        self.send_to_param_servers("send");
+                        self.state = CoordinatorState::ParamServersSending;
+                        transitioned = true;
+                    }
+                }
+                CoordinatorState::ParamServersSending => {
+                    if self.param_servers_send_done >= self.num_param_servers {
+                        self.param_servers_send_done = 0;
+                        self.cycle += 1;
+                        println!("[Coordinator] ===== Cycle {} complete =====\n", self.cycle);
+                        if self.cycle < self.max_cycles {
+                            self.send_to_workers("compute");
+                            self.state = CoordinatorState::WorkersComputing;
+                            transitioned = true;
                         }
-
-                        else if w_type.eq("param_server"){
-                            if message.eq("wait") {
-                                self.param_server_state.not_ready+=1;
-                                if self.param_server_state.not_ready == self.param_server_state.total{
-                                    // set the param server to ready
-                                    // send to compute
-                                }
-                            }
-                            if message.eq("compute_done"){
-                                // send paramserver to send the gradients
-                            }
-                            if message.eq("send_done"){
-                                // then make them wait
-                                // set them non ready
-                            }
-                        }
-                    },
-
-                    _ => {
-                        println!("not recognised command");
                     }
                 }
             }
+            if !transitioned { break; }
         }
-
-
-
     }
-
-    pub fn run_cycles(&mut self){
-
-        self.config_plane_tx.send(Protocol::ToParamServerCommand{ id: 0, cmd: "wait".to_string()}).unwrap();
-        self.config_plane_tx.send(Protocol::ToWorkerCommand{id:1, cmd: "wait".to_string()}).unwrap();
-        for _ in 0..10{
-            for _ in 0..4 {
-                self.run_state();
-                println!("{}",self.get_state());
-          }
-        }
-        
-    }
-
 }
-
-
-// Collecting gradients -> wrokier computes and sends to accumulator
-// Aggregating gradients -> accumulator computes average gradient
-// update model -> worker updates model with average gradient
-// broadcasting model -> worker broadcasts updated model (not implemented yet)

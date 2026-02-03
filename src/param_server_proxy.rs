@@ -1,113 +1,105 @@
+use std::time::Duration;
 
 use crate::protocol::Protocol;
-use std::sync::mpsc;
-use tokio::sync::broadcast::{Sender , Receiver};
 use crate::accumulator::Accumulator;
-
 use crate::gradient::Gradient;
+use tokio::sync::broadcast::{Sender, Receiver};
 
-#[derive(Clone, Copy)]
-enum state {
-    compute,
-    send,
-    wait
+#[derive(Copy, Clone, PartialEq)]
+enum State {
+    Wait,
+    Compute,
+    Send,
 }
 
 pub struct ParamServerProxy {
     id: u16,
+    tx: Sender<Protocol>,
     rx: Receiver<Protocol>,
     accumulator: Accumulator,
-    state: state,
-    worker_address: Vec<Protocol>
+    state: State,
+    num_workers: u16,
+    avg_gradient: Option<Gradient>,
 }
 
-
-
 impl ParamServerProxy {
-    // each prama server proxy has its own accumulator
-    pub fn new(id: u16, tx: Sender<Protocol>) ->  Self {
-        let tx = tx;
-        ParamServerProxy { 
+    pub fn new(id: u16, tx: Sender<Protocol>, num_workers: u16) -> Self {
+        let rx = tx.subscribe();
+        ParamServerProxy {
             id,
-            rx: tx.subscribe(),
+            tx,
+            rx,
             accumulator: Accumulator::new(),
-            state: state::wait,
-            worker_address: Vec::new(),
+            state: State::Wait,
+            num_workers,
+            avg_gradient: None,
         }
     }
 
-    fn transition_state(&mut self) {
-        match self.state {
-            state::wait => self.state = state::compute,
-            state::compute => self.state = state::send,
-            state::send => self.state = state::wait,
-        }
-    }
+    pub async fn listen(&mut self) {
+        loop {
+            match self.rx.recv().await {
+                // accumulate every gradient that hits the wire
+                Ok(Protocol::GradientToParamServer { worker_proxy_id, gradient }) => {
+                    self.accumulator.add_gradient(gradient);
+                    println!("[ParamServerProxy {}] Accumulated gradient from worker {}, total {}/{}",
+                             self.id, worker_proxy_id,
+                             self.accumulator.total_collected, self.num_workers);
 
-    fn is_state (&self, state: state)-> bool {
-        match self.state {
-            state=> true,
-            _ => false
-        }
-
-    }
-    
-    fn compute(&self){
-        
-    }
-    
-    fn send(&self){
-        
-    }
-    
-    pub async fn listen(&mut self){
-        // The param server proxy receives commands from the param server:
-        // it receives command to accumulate
-        // it receives command to wait and receive
-        // it receives command to send avg gradients back
-
-        // maybe recieve and send acks from the workwrs
-        // this changes state from send to wait. similarly for proxy workers as well
-
-
-
-        loop{
-            if let Ok(command) = self.rx.recv().await {
-                match command {
-                    Protocol::ToParamServerProxyCommandAddressChannelLocal { id, worker_address } => {
-                        self.worker_address.push(Protocol::ToParamServerProxyCommandAddressChannelLocal { id, worker_address });
-                    },
-
-                    Protocol::ToParamServerProxyCommandAddressChannelTcp {id, worker_address} =>{
-                        self.worker_address.push(Protocol::ToParamServerProxyCommandAddressChannelTcp { id, worker_address });
-                    },
-
-                    Protocol::ToParamServerProxyCommand {id, cmd} =>{
-                        if cmd.eq("compute") {
-                            if self.is_state(state::wait){
-                                self.state = state::compute;
-                                self.compute();
-                            }
-                            else if self.is_state(state::send){
-                                // reject
-                            }
-                        }
-                        else if cmd.eq("send") {
-                            if self.is_state(state::compute){
-                                self.send();
-                            } 
-                            else if self.is_state(state::wait){
-                                //reject
-                            }
-                        }
+                    if self.accumulator.is_ready(self.num_workers as u32) {
+                        // tell coordinator all shards for this param server are in
+                        self.tx.send(Protocol::ToCoordinatorMessage {
+                            id: self.id,
+                            message: "receive_done".to_string(),
+                            w_type: "param_server".to_string(),
+                        }).unwrap();
                     }
-
-                    _ => {
-                        println!("unknown command at param proxy ");
-                    },
                 }
+
+                Ok(Protocol::ToParamServerProxyCommand { id, cmd }) if id == self.id => {
+                    match cmd.as_str() {
+                        "compute" if self.state == State::Wait => {
+                            self.state = State::Compute;
+                            // simulate compute latency
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            self.avg_gradient = Some(self.accumulator.get_avg_gradient());
+                            println!("[ParamServerProxy {}] Computed avg gradient: {:?}",
+                                     self.id, self.avg_gradient.as_ref().unwrap().gr_vec);
+                            self.tx.send(Protocol::ToCoordinatorMessage {
+                                id: self.id,
+                                message: "compute_done".to_string(),
+                                w_type: "param_server".to_string(),
+                            }).unwrap();
+                        }
+                        "send" if self.state == State::Compute => {
+                            self.state = State::Send;
+                            // broadcast the averaged gradient back to workers
+                            if let Some(avg) = self.avg_gradient.take() {
+                                self.tx.send(Protocol::GradientFromParamServer {
+                                    param_server_proxy_id: self.id,
+                                    gradient: avg,
+                                }).unwrap();
+                                println!("[ParamServerProxy {}] Sent avg gradient back to workers.", self.id);
+                            }
+                            // reset accumulator for the next cycle
+                            self.accumulator.reset();
+                            self.state = State::Wait;
+                            self.tx.send(Protocol::ToCoordinatorMessage {
+                                id: self.id,
+                                message: "send_done".to_string(),
+                                w_type: "param_server".to_string(),
+                            }).unwrap();
+                        }
+                        _ => {}
+                    }
+                }
+
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    eprintln!("[ParamServerProxy {}] Lagged by {} messages, re-syncing.", self.id, n);
+                }
+                Err(_) => break,
             }
         }
-
     }
 }

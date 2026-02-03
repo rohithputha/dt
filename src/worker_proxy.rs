@@ -1,115 +1,94 @@
-use std::thread;
-use std::time::Duration;
 use rand::Rng;
 
+use std::time::Duration;
+
 use crate::protocol::Protocol;
-use crate::gradient::Gradient;  
-use tokio::sync::broadcast::{Receiver, Sender};
-use crate::worker_proxy::state::{compute, send, wait};
+use crate::gradient::Gradient;
+use tokio::sync::broadcast::{Sender, Receiver};
+
+#[derive(Copy, Clone, PartialEq)]
+enum State {
+    Wait,
+    Compute,
+    Send,
+}
+
 pub struct WorkerProxy {
     id: u16,
     tx: Sender<Protocol>,
     rx: Receiver<Protocol>,
-    state: state,
-
-    gradient_destinations: Vec<Protocol>
+    state: State,
+    gradient: Option<Gradient>,
 }
-
-
-#[derive(Copy, Clone)] // better if eq or partial eq?
-enum state {
-    wait,
-    compute,
-    send,
-}
-
-
 
 impl WorkerProxy {
     pub fn new(id: u16, tx: Sender<Protocol>) -> Self {
-        let mut rx = tx.subscribe();
-        WorkerProxy { 
+        let rx = tx.subscribe();
+        WorkerProxy {
             id,
             tx,
             rx,
-            state: wait,
-
-            gradient_destinations: Vec::new()
+            state: State::Wait,
+            gradient: None,
         }
     }
 
-    fn transition_state(&mut self) {
-        match self.state {
-            wait => self.state = compute,
-            compute => self.state = send,
-            send => self.state = wait
+    // generate a dummy 10-dimensional random gradient
+    fn compute(&mut self) {
+        let mut rng = rand::thread_rng();
+        let gr_vec: Vec<f32> = (0..10).map(|_| rng.gen_range(-1.0_f32..1.0_f32)).collect();
+        println!("[WorkerProxy {}] Computed dummy gradient: {:?}", self.id, gr_vec);
+        self.gradient = Some(Gradient::new(gr_vec, self.id as u32, 0));
+    }
+
+    // broadcast the computed gradient so every ParamServerProxy picks it up
+    fn send(&mut self) {
+        if let Some(grad) = self.gradient.take() {
+            self.tx.send(Protocol::GradientToParamServer {
+                worker_proxy_id: self.id,
+                gradient: grad,
+            }).unwrap();
+            println!("[WorkerProxy {}] Sent gradient to param server proxies.", self.id);
         }
-
     }
 
-    fn is_state(&self, st: state) -> bool {
-        match self.state {
-            st => true,
-            _ => false
-        }
-    }
-
-    fn compute(&mut self){
-        thread::sleep(Duration::from_secs(1));
-        // this has to load the latest model and calculate the gradients for this step
-    }
-
-    fn send(&self){
-        // implement the send of gradients to various param servers
-        // for TCP maybe do TCP streaming.
-    }
-
-    pub async fn listen(&mut self){
-
-        // This worker proxy thread should take two commands:
-        // 1. Take param server addresses when provided (along with gradient range provided)
-        // 2. take a command compute next set of gradients by loadng the present model,
-        // The worker proxy should also send the gradients (sharded) to all the param server proxies
-        // After sending the worker should wait for further commands
-
-        let mut rx = self.tx.subscribe();
+    pub async fn listen(&mut self) {
         loop {
-            if let Ok(command) = rx.recv().await {
-                match command {
-                    Protocol::ToWorkerProxyCommandAddressChannelTcp {id, param_server_proxy_address, gradient_range} =>{
-                        self.gradient_destinations.push(Protocol::ToWorkerProxyCommandAddressChannelTcp {id, param_server_proxy_address, gradient_range});
-                    }
-
-                    Protocol::ToWorkerProxyCommandAddressChannelLocal {id, param_server_proxy_address, gradient_range} => {
-                        self.gradient_destinations.push(Protocol::ToWorkerProxyCommandAddressChannelLocal {id, param_server_proxy_address, gradient_range});
-                    }
-
-                    Protocol::ToWorkerProxyCommand {id, cmd} =>{
-
-                        if cmd.eq("compute"){
-                            if self.is_state(state::wait){
-                                self.transition_state();
-                                self.compute();
-                            }
-                            if self.is_state(state::send){
-                                // this has to be rejected ?
-                            }
+            match self.rx.recv().await {
+                Ok(Protocol::ToWorkerProxyCommand { id, cmd }) if id == self.id => {
+                    match cmd.as_str() {
+                        // turns out this is the shorter way to match the incoming command and check the state
+                        "compute" if self.state == State::Wait => {
+                            self.state = State::Compute;
+                            self.compute();
+                            // simulate compute latency
+                            tokio::time::sleep(Duration::from_millis(150)).await;
+                            // notify coordinator
+                            self.tx.send(Protocol::ToCoordinatorMessage {
+                                id: self.id,
+                                message: "compute_done".to_string(),
+                                w_type: "worker".to_string(),
+                            }).unwrap();
                         }
-                        else if cmd.eq("send"){
-                            if self.is_state(state::compute){
-                                self.transition_state();
-                                self.send()
-                            }
-                            else if self.is_state(state::wait){
-                                // reject it
-                            }
+                        "send" if self.state == State::Compute => {
+                            self.state = State::Send;
+                            self.send();
+                            // notify coordinator
+                            self.tx.send(Protocol::ToCoordinatorMessage {
+                                id: self.id,
+                                message: "send_done".to_string(),
+                                w_type: "worker".to_string(),
+                            }).unwrap();
+                            self.state = State::Wait;
                         }
-                    }
-                    
-                    _ =>{
-                        println!("Unknown command in worker proxy");
+                        _ => {}
                     }
                 }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    eprintln!("[WorkerProxy {}] Lagged by {} messages, re-syncing.", self.id, n);
+                }
+                Err(_) => break,
             }
         }
     }
